@@ -110,4 +110,66 @@ def build_metrics(votacao_zip, perfil_zip):
     df['cargo_key'] = df[cargo].map(cargo_key)
     df = df[df['cargo_key'].notna()]
 
-    df[votos] = pd.to_numeric(df[votos], errors='coerce').fillna(0)_
+    df[votos] = pd.to_numeric(df[votos], errors='coerce').fillna(0).astype(int)
+
+    municipios = {}
+    for (m,),_ in df.groupby([cod_mun]):
+        municipios[m] = {"nome": m, "secoes": 0, "abst": None, "winner": {}, "zonas": {}}
+
+    sec_counts = df.groupby([cod_mun,zona])[secao].nunique().reset_index().rename(columns={secao:'secoes'})
+    for _,r in sec_counts.iterrows():
+        m=str(r[cod_mun]); z=str(r[zona])
+        municipios[m]["zonas"].setdefault(z, {"zona": int(z), "secoes": int(r['secoes']), "abst": None, "brancos": None, "nulos": None, "top": {}})
+        municipios[m]["secoes"] = int(df[df[cod_mun]==m][secao].nunique())
+
+    top = df.groupby([cod_mun,zona,'cargo_key',turno,nome, partido])[votos].sum().reset_index()
+    top['rank'] = top.groupby([cod_mun,zona,'cargo_key',turno])[votos].rank(method='first', ascending=False)
+    top = top[top['rank']<=5]
+
+    totals = df.groupby([cod_mun,zona,'cargo_key',turno])[votos].sum().reset_index().rename(columns={votos:'tot'})
+    top = top.merge(totals, on=[cod_mun,zona,'cargo_key',turno], how='left')
+    top['pct'] = (top[votos]/top['tot']).where(top['tot']>0, 0.0)
+
+    for _,r in top.iterrows():
+        m=str(r[cod_mun]); z=str(r[zona]); ck=str(r['cargo_key']); t=str(r[turno])
+        municipios[m]["zonas"].setdefault(z, {"zona": int(z), "secoes": 0, "abst": None, "brancos": None, "nulos": None, "top": {}})
+        municipios[m]["zonas"][z]["top"].setdefault(ck, {}).setdefault(t, [])
+        municipios[m]["zonas"][z]["top"][ck][t].append({"nome": str(r[nome]), "partido": str(r[partido]) if partido else None, "pct": float(r['pct'])})
+
+    w = df.groupby([cod_mun,'cargo_key',turno,nome, partido])[votos].sum().reset_index()
+    w['rank'] = w.groupby([cod_mun,'cargo_key',turno])[votos].rank(method='first', ascending=False)
+    w = w[w['rank']==1]
+    for _,r in w.iterrows():
+        m=str(r[cod_mun]); ck=str(r['cargo_key']); t=str(r[turno])
+        municipios[m]["winner"].setdefault(ck, {})[t] = {"nome": str(r[nome]), "partido": str(r[partido]) if partido else None}
+
+    out = {"meta":{"status":"ok","year":2022}, "municipios": municipios}
+    with open(os.path.join(OUT,"metrics_2022.json"),"w",encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False)
+    return out
+
+def main():
+    # malha: aceita zip OU shp direto (se você já subiu os arquivos descompactados)
+    malha = find_one([
+        "AL_Municipios_2024.zip", "AL_Municipios_2024.zip.*", "*Municipios*AL*.zip*",
+        "AL_Municipios_2024.shp", "*Municipios*AL*.shp"
+    ])
+
+    # TSE: aceita .zip e .zip.download.zip automaticamente
+    votacao = find_one([
+        "votacao_secao_2022_AL.zip", "votacao_secao_2022_AL.zip.*", "*vot*secao*AL*2022*.zip*"
+    ])
+    perfil = find_one([
+        "perfil_eleitor_secao_2022_AL.zip", "perfil_eleitor_secao_2022_AL.zip.*", "*perfil*secao*AL*2022*.zip*"
+    ])
+
+    if not malha or not votacao or not perfil:
+        raise SystemExit(f"Faltam arquivos em raw_data/. Encontrados: malha={bool(malha)} votacao={bool(votacao)} perfil={bool(perfil)}")
+
+    geo_from_path(malha)
+    build_metrics(votacao, perfil)
+
+    print("OK: arquivos gerados em public/data/")
+
+if __name__ == "__main__":
+    main()
